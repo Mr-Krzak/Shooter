@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Phaser Multiplayer Shooter</title>
+
+<script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.js"></script>
+
+<script type="module">
+
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+import { 
+    getDatabase, 
+    ref, 
+    set, 
+    push,
+    remove,
+    update as updatePlayerData, 
+    onValue, 
+    onDisconnect 
+} from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+/* ================= FIREBASE CONFIG ================= */
+
+const firebaseConfig = {
+  apiKey: "AIzaSyC77CXjhgwuiNqS9QxOHd8Tf8SPwEzFoHM",
+  authDomain: "phaser-multiplayer-game-52eaa.firebaseapp.com",
+  databaseURL: "https://phaser-multiplayer-game-52eaa-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "phaser-multiplayer-game-52eaa",
+  storageBucket: "phaser-multiplayer-game-52eaa.firebasestorage.app",
+  messagingSenderId: "902358290008",
+  appId: "1:902358290008:web:685e8d667957a9537e842d"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const database = getDatabase(app);
+
+/* ================= GLOBAL VARIABLES ================= */
+
+let playerId = null;
+let playerName = "";
+let cursors;
+let localPlayer;
+let otherPlayers = {};
+let bullets = {};
+let lastPosition = { x: 0, y: 0 };
+let mousePointer;
+
+let networkTimer = 0;
+const NETWORK_RATE = 100;
+
+/* ================= LOGIN ================= */
+
+async function login() {
+    const userCredential = await signInAnonymously(auth);
+    playerId = userCredential.user.uid;
+    console.log("Logged in:", playerId);
+}
+
+/* ================= MENU ================= */
+
+function createMenu() {
+
+    const container = document.createElement("div");
+    container.style.position = "absolute";
+    container.style.top = "50%";
+    container.style.left = "50%";
+    container.style.transform = "translate(-50%, -50%)";
+    container.style.textAlign = "center";
+
+    const input = document.createElement("input");
+    input.placeholder = "Enter your name";
+
+    const button = document.createElement("button");
+    button.innerText = "Join Game";
+
+    button.onclick = () => {
+        playerName = input.value.trim();
+        if (!playerName) return alert("Enter name!");
+        container.remove();
+        startGame();
+    };
+
+    container.appendChild(input);
+    container.appendChild(document.createElement("br"));
+    container.appendChild(document.createElement("br"));
+    container.appendChild(button);
+
+    document.body.appendChild(container);
+}
+
+/* ================= START GAME ================= */
+
+function startGame() {
+
+    const config = {
+        type: Phaser.AUTO,
+        width: 800,
+        height: 600,
+        physics: { default: "arcade" },
+        scene: { preload, create, update: gameUpdate }
+    };
+
+    new Phaser.Game(config);
+}
+
+/* ================= PHASER ================= */
+
+function preload() {}
+
+function create() {
+
+    cursors = this.input.keyboard.addKeys({
+        w: Phaser.Input.Keyboard.KeyCodes.W,
+        a: Phaser.Input.Keyboard.KeyCodes.A,
+        s: Phaser.Input.Keyboard.KeyCodes.S,
+        d: Phaser.Input.Keyboard.KeyCodes.D
+    });
+
+    mousePointer = this.input.activePointer;
+
+    /* Detect mouse click */
+    this.input.on("pointerdown", () => {
+        shoot();
+    });
+
+    localPlayer = this.add.rectangle(400, 300, 32, 32, 0x00ff00);
+    this.physics.add.existing(localPlayer);
+
+    lastPosition.x = localPlayer.x;
+    lastPosition.y = localPlayer.y;
+
+    const playerRef = ref(database, "players/" + playerId);
+
+    set(playerRef, {
+        name: playerName,
+        x: localPlayer.x,
+        y: localPlayer.y
+    });
+
+    onDisconnect(playerRef).remove();
+
+    /* ================= PLAYERS SYNC ================= */
+
+    onValue(ref(database, "players"), (snapshot) => {
+
+        const players = snapshot.val();
+        if (!players) return;
+
+        for (let id in otherPlayers) {
+            if (!players[id]) {
+                otherPlayers[id].destroy();
+                delete otherPlayers[id];
+            }
+        }
+
+        for (let id in players) {
+
+            if (id === playerId) continue;
+
+            if (!otherPlayers[id]) {
+                otherPlayers[id] = this.add.rectangle(
+                    players[id].x,
+                    players[id].y,
+                    32,
+                    32,
+                    0xff0000
+                );
+            }
+
+            this.tweens.add({
+                targets: otherPlayers[id],
+                x: players[id].x,
+                y: players[id].y,
+                duration: 100,
+                ease: "Linear"
+            });
+        }
+    });
+
+    /* ================= BULLETS SYNC ================= */
+
+    onValue(ref(database, "bullets"), (snapshot) => {
+
+        const data = snapshot.val();
+        if (!data) return;
+
+        for (let id in bullets) {
+            if (!data[id]) {
+                bullets[id].destroy();
+                delete bullets[id];
+            }
+        }
+
+        for (let id in data) {
+
+            if (!bullets[id]) {
+
+                bullets[id] = this.add.circle(
+                    data[id].x,
+                    data[id].y,
+                    5,
+                    0xffff00
+                );
+
+                bullets[id].firebaseData = data[id];
+            }
+        }
+    });
+}
+
+/* ================= SHOOT FUNCTION ================= */
+
+function shoot() {
+
+    const speed = 400;
+
+    /* Obliczamy kierunek w stronę myszy */
+    const dx = mousePointer.worldX - localPlayer.x;
+    const dy = mousePointer.worldY - localPlayer.y;
+
+    const length = Math.sqrt(dx * dx + dy * dy);
+
+    const vx = (dx / length) * speed;
+    const vy = (dy / length) * speed;
+
+    const bulletRef = push(ref(database, "bullets"));
+
+    const bulletData = {
+        owner: playerId,
+        x: localPlayer.x,
+        y: localPlayer.y,
+        vx: vx,
+        vy: vy
+    };
+
+    set(bulletRef, bulletData);
+
+    setTimeout(() => {
+        remove(bulletRef);
+    }, 2000);
+}
+
+/* ================= UPDATE LOOP ================= */
+
+function gameUpdate(time, delta) {
+
+    const speed = 200;
+
+    /* WASD movement */
+    if (cursors.a.isDown) localPlayer.x -= speed * delta / 1000;
+    if (cursors.d.isDown) localPlayer.x += speed * delta / 1000;
+    if (cursors.w.isDown) localPlayer.y -= speed * delta / 1000;
+    if (cursors.s.isDown) localPlayer.y += speed * delta / 1000;
+
+    localPlayer.x = Phaser.Math.Clamp(localPlayer.x, 16, 784);
+    localPlayer.y = Phaser.Math.Clamp(localPlayer.y, 16, 584);
+
+    /* ================= BULLET MOVEMENT ================= */
+
+    for (let id in bullets) {
+
+        const bullet = bullets[id];
+        const data = bullet.firebaseData;
+
+        if (!data) continue;
+
+        bullet.x += data.vx * delta / 1000;
+        bullet.y += data.vy * delta / 1000;
+
+        if (data.owner === playerId) {
+            updatePlayerData(ref(database, "bullets/" + id), {
+                x: bullet.x,
+                y: bullet.y
+            });
+        }
+    }
+
+    /* ================= PLAYER NETWORK UPDATE ================= */
+
+    networkTimer += delta;
+
+    if (networkTimer >= NETWORK_RATE) {
+
+        networkTimer = 0;
+
+        if (localPlayer.x !== lastPosition.x ||
+            localPlayer.y !== lastPosition.y) {
+
+            updatePlayerData(ref(database, "players/" + playerId), {
+                x: localPlayer.x,
+                y: localPlayer.y
+            });
+
+            lastPosition.x = localPlayer.x;
+            lastPosition.y = localPlayer.y;
+        }
+    }
+}
+
+/* ================= INIT ================= */
+
+try {
+    await login();
+    createMenu();
+} catch (err) {
+    console.error(err);
+    alert("Firebase error — check console.");
+}
+
+</script>
+
+</head>
+<body style="margin:0; overflow:hidden;"></body>
+</html>
