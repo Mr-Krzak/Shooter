@@ -16,9 +16,10 @@ import {
     set, 
     push,
     remove,
-    update as updatePlayerData, 
+    update,
     onValue, 
-    onDisconnect 
+    onDisconnect,
+    runTransaction
 } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
 
 /* ================= FIREBASE CONFIG ================= */
@@ -37,16 +38,28 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const database = getDatabase(app);
 
-/* ================= GLOBAL VARIABLES ================= */
+/* ================= GLOBAL ================= */
 
-let playerId = null;
-let playerName = "";
-let cursors;
+let playerId;
+let playerName;
 let localPlayer;
-let otherPlayers = {};
-let bullets = {};
-let lastPosition = { x: 0, y: 0 };
+let cursors;
 let mousePointer;
+let walls;
+let bulletGroup;
+let otherPlayers = {};
+let playerHP = 5;
+let isDead = false;
+let lastHitBy = null;
+let score = 0;
+
+let lastCombatTime = 0;
+let regenTimer = 0;
+let grenadeCooldown = false;
+
+let hpText;
+let scoreText;
+let leaderboardText;
 
 let networkTimer = 0;
 const NETWORK_RATE = 100;
@@ -54,264 +67,408 @@ const NETWORK_RATE = 100;
 /* ================= LOGIN ================= */
 
 async function login() {
-    const userCredential = await signInAnonymously(auth);
-    playerId = userCredential.user.uid;
-    console.log("Logged in:", playerId);
+    const user = await signInAnonymously(auth);
+    playerId = user.user.uid;
 }
 
 /* ================= MENU ================= */
 
 function createMenu() {
+    const div = document.createElement("div");
+    div.style.position="absolute";
+    div.style.top="50%";
+    div.style.left="50%";
+    div.style.transform="translate(-50%,-50%)";
 
-    const container = document.createElement("div");
-    container.style.position = "absolute";
-    container.style.top = "50%";
-    container.style.left = "50%";
-    container.style.transform = "translate(-50%, -50%)";
-    container.style.textAlign = "center";
+    const input=document.createElement("input");
+    input.placeholder="Enter name";
 
-    const input = document.createElement("input");
-    input.placeholder = "Enter your name";
+    const btn=document.createElement("button");
+    btn.innerText="Join";
 
-    const button = document.createElement("button");
-    button.innerText = "Join Game";
-
-    button.onclick = () => {
-        playerName = input.value.trim();
-        if (!playerName) return alert("Enter name!");
-        container.remove();
+    btn.onclick=()=>{
+        playerName=input.value.trim();
+        if(!playerName) return alert("Enter name");
+        div.remove();
         startGame();
     };
 
-    container.appendChild(input);
-    container.appendChild(document.createElement("br"));
-    container.appendChild(document.createElement("br"));
-    container.appendChild(button);
-
-    document.body.appendChild(container);
+    div.append(input,document.createElement("br"),document.createElement("br"),btn);
+    document.body.appendChild(div);
 }
 
-/* ================= START GAME ================= */
+/* ================= START ================= */
 
-function startGame() {
+function startGame(){
 
-    const config = {
-        type: Phaser.AUTO,
-        width: 800,
-        height: 600,
-        physics: { default: "arcade" },
-        scene: { preload, create, update: gameUpdate }
+    new Phaser.Game({
+        type:Phaser.AUTO,
+        width:1200,
+        height:800,
+        physics:{ default:"arcade", arcade:{ debug:false } },
+        scene:{ preload,create,update:gameUpdate }
+    });
+}
+
+/* ================= CREATE ================= */
+
+function preload(){}
+
+function create(){
+
+    this.physics.world.setBounds(0,0,3000,3000);
+    this.cameras.main.setBounds(0,0,3000,3000);
+
+    /* BULLET TEXTURE */
+
+    const g = this.add.graphics();
+    g.fillStyle(0xffff00,1);
+    g.fillCircle(8,8,8);
+    g.generateTexture('bulletTexture',16,16);
+    g.destroy();
+
+    /* PLAYER */
+
+    const playerColor = Phaser.Display.Color.RandomRGB().color;
+
+    localPlayer=this.add.rectangle(400,300,32,32,playerColor);
+    this.physics.add.existing(localPlayer);
+    localPlayer.body.setCollideWorldBounds(true);
+    this.cameras.main.startFollow(localPlayer);
+
+    cursors=this.input.keyboard.addKeys("W,A,S,D");
+    mousePointer=this.input.activePointer;
+    this.input.on("pointerdown",()=>shoot());
+
+    this.input.keyboard.on("keydown-G",()=>throwGrenade());
+
+    /* WALLS */
+
+    walls=this.physics.add.staticGroup();
+
+    const createWall=(x,y,w,h)=>{
+        const wall=this.add.rectangle(x,y,w,h,0x444444);
+        this.physics.add.existing(wall,true);
+        walls.add(wall);
     };
 
-    new Phaser.Game(config);
-}
+    createWall(600,600,500,40);
+    createWall(1200,900,40,600);
+    createWall(1800,1500,700,40);
+    createWall(2400,2000,40,800);
+    createWall(800,2200,400,40);
+    createWall(1500,500,300,40);
+    createWall(2600,1000,500,40);
+    createWall(1000,1700,40,500);
 
-/* ================= PHASER ================= */
+    this.physics.add.collider(localPlayer,walls);
 
-function preload() {}
+    /* BULLETS */
 
-function create() {
+    bulletGroup = this.physics.add.group();
 
-    cursors = this.input.keyboard.addKeys({
-        w: Phaser.Input.Keyboard.KeyCodes.W,
-        a: Phaser.Input.Keyboard.KeyCodes.A,
-        s: Phaser.Input.Keyboard.KeyCodes.S,
-        d: Phaser.Input.Keyboard.KeyCodes.D
+    this.physics.add.collider(bulletGroup, walls, (bullet)=>{
+        remove(ref(database,"bullets/"+bullet.firebaseId));
     });
 
-    mousePointer = this.input.activePointer;
+    /* TRAIL */
 
-    /* Detect mouse click */
-    this.input.on("pointerdown", () => {
-        shoot();
-    });
+    const particles = this.add.particles('bulletTexture');
+    particles.setBlendMode(Phaser.BlendModes.ADD);
 
-    localPlayer = this.add.rectangle(400, 300, 32, 32, 0x00ff00);
-    this.physics.add.existing(localPlayer);
+    /* UI */
 
-    lastPosition.x = localPlayer.x;
-    lastPosition.y = localPlayer.y;
+    hpText=this.add.text(20,20,"HP:5",{fontSize:"22px"}).setScrollFactor(0);
+    scoreText=this.add.text(20,50,"Score:0",{fontSize:"22px"}).setScrollFactor(0);
+    leaderboardText=this.add.text(1000,20,"",{fontSize:"18px"}).setScrollFactor(0);
 
-    const playerRef = ref(database, "players/" + playerId);
+    /* FIREBASE PLAYER */
 
-    set(playerRef, {
-        name: playerName,
-        x: localPlayer.x,
-        y: localPlayer.y
+    const playerRef=ref(database,"players/"+playerId);
+
+    set(playerRef,{
+        name:playerName,
+        x:400,
+        y:300,
+        hp:5,
+        alive:true,
+        score:0,
+        color:playerColor
     });
 
     onDisconnect(playerRef).remove();
 
-    /* ================= PLAYERS SYNC ================= */
+    /* PLAYERS SYNC */
 
-    onValue(ref(database, "players"), (snapshot) => {
+    onValue(ref(database,"players"),snapshot=>{
+        const players=snapshot.val();
+        if(!players) return;
 
-        const players = snapshot.val();
-        if (!players) return;
+        const sorted = Object.values(players)
+            .sort((a,b)=> (b.score||0)-(a.score||0))
+            .slice(0,10);
 
-        for (let id in otherPlayers) {
-            if (!players[id]) {
+        let text="TOP 10\n";
+        sorted.forEach(p=>{
+            text+=p.name+" : "+(p.score||0)+"\n";
+        });
+        leaderboardText.setText(text);
+
+        for(let id in otherPlayers){
+            if(!players[id]){
                 otherPlayers[id].destroy();
                 delete otherPlayers[id];
             }
         }
 
-        for (let id in players) {
+        for(let id in players){
 
-            if (id === playerId) continue;
+            if(id===playerId){
+                score = players[id].score || 0;
+                continue;
+            }
 
-            if (!otherPlayers[id]) {
-                otherPlayers[id] = this.add.rectangle(
-                    players[id].x,
-                    players[id].y,
-                    32,
-                    32,
-                    0xff0000
+            const data=players[id];
+
+            if(!otherPlayers[id]){
+                otherPlayers[id]=this.add.rectangle(
+                    data.x,data.y,32,32,
+                    data.alive?data.color:0x555555
                 );
             }
 
-            this.tweens.add({
-                targets: otherPlayers[id],
-                x: players[id].x,
-                y: players[id].y,
-                duration: 100,
-                ease: "Linear"
-            });
+            otherPlayers[id].x=data.x;
+            otherPlayers[id].y=data.y;
+            otherPlayers[id].setFillStyle(data.alive?data.color:0x555555);
         }
     });
 
-    /* ================= BULLETS SYNC ================= */
+    /* BULLET SYNC */
 
-    onValue(ref(database, "bullets"), (snapshot) => {
+    onValue(ref(database,"bullets"),snapshot=>{
+        const data=snapshot.val();
+        if(!data) return;
 
-        const data = snapshot.val();
-        if (!data) return;
+        bulletGroup.clear(true,true);
 
-        for (let id in bullets) {
-            if (!data[id]) {
-                bullets[id].destroy();
-                delete bullets[id];
-            }
+        for(let id in data){
+
+            const b=bulletGroup.create(data[id].x,data[id].y,'bulletTexture');
+            b.setScale(0.8);
+            b.body.setAllowGravity(false);
+            b.body.setCircle(8);
+            b.body.velocity.x=data[id].vx;
+            b.body.velocity.y=data[id].vy;
+            b.owner=data[id].owner;
+            b.firebaseId=id;
+
+            particles.startFollow(b,0,0,1);
         }
+    });
 
-        for (let id in data) {
+    /* GRENADE SYNC */
 
-            if (!bullets[id]) {
+    onValue(ref(database,"grenades"),snapshot=>{
+        const data=snapshot.val();
+        if(!data) return;
 
-                bullets[id] = this.add.circle(
-                    data[id].x,
-                    data[id].y,
-                    5,
-                    0xffff00
-                );
+        for(let id in data){
 
-                bullets[id].firebaseData = data[id];
-            }
+            const g=data[id];
+
+            const circle=this.add.circle(g.x,g.y,60,0xff0000,0.3);
+
+            this.time.delayedCall(300,()=>{
+
+                if(g.owner!==playerId && playerHP>0){
+
+                    const dist=Phaser.Math.Distance.Between(
+                        g.x,g.y,
+                        localPlayer.x,localPlayer.y
+                    );
+
+                    if(dist<60){
+                        playerHP--;
+                        lastCombatTime=this.time.now;
+                        if(playerHP<=0) handleDeath();
+                    }
+                }
+
+                circle.destroy();
+            });
         }
     });
 }
 
-/* ================= SHOOT FUNCTION ================= */
+/* ================= SHOOT ================= */
 
-function shoot() {
+function shoot(){
 
-    const speed = 400;
+    if(playerHP<=0) return;
 
-    /* Obliczamy kierunek w stronę myszy */
-    const dx = mousePointer.worldX - localPlayer.x;
-    const dy = mousePointer.worldY - localPlayer.y;
+    lastCombatTime = performance.now();
 
-    const length = Math.sqrt(dx * dx + dy * dy);
+    const speed=600;
+    const dx=mousePointer.worldX-localPlayer.x;
+    const dy=mousePointer.worldY-localPlayer.y;
+    const len=Math.sqrt(dx*dx+dy*dy);
 
-    const vx = (dx / length) * speed;
-    const vy = (dy / length) * speed;
+    const vx=(dx/len)*speed;
+    const vy=(dy/len)*speed;
 
-    const bulletRef = push(ref(database, "bullets"));
+    const bulletRef=push(ref(database,"bullets"));
 
-    const bulletData = {
-        owner: playerId,
-        x: localPlayer.x,
-        y: localPlayer.y,
-        vx: vx,
-        vy: vy
-    };
+    set(bulletRef,{
+        owner:playerId,
+        x:localPlayer.x,
+        y:localPlayer.y,
+        vx,vy
+    });
 
-    set(bulletRef, bulletData);
-
-    setTimeout(() => {
-        remove(bulletRef);
-    }, 2000);
+    setTimeout(()=>remove(bulletRef),2000);
 }
 
-/* ================= UPDATE LOOP ================= */
+/* ================= GRENADE ================= */
 
-function gameUpdate(time, delta) {
+function throwGrenade(){
 
-    const speed = 200;
+    if(grenadeCooldown || playerHP<=0) return;
 
-    /* WASD movement */
-    if (cursors.a.isDown) localPlayer.x -= speed * delta / 1000;
-    if (cursors.d.isDown) localPlayer.x += speed * delta / 1000;
-    if (cursors.w.isDown) localPlayer.y -= speed * delta / 1000;
-    if (cursors.s.isDown) localPlayer.y += speed * delta / 1000;
+    grenadeCooldown=true;
 
-    localPlayer.x = Phaser.Math.Clamp(localPlayer.x, 16, 784);
-    localPlayer.y = Phaser.Math.Clamp(localPlayer.y, 16, 584);
+    const grenadeRef=push(ref(database,"grenades"));
 
-    /* ================= BULLET MOVEMENT ================= */
+    set(grenadeRef,{
+        owner:playerId,
+        x:mousePointer.worldX,
+        y:mousePointer.worldY
+    });
 
-    for (let id in bullets) {
+    setTimeout(()=>remove(grenadeRef),1000);
+    setTimeout(()=>grenadeCooldown=false,3000);
+}
 
-        const bullet = bullets[id];
-        const data = bullet.firebaseData;
+/* ================= DEATH ================= */
 
-        if (!data) continue;
+function handleDeath(){
 
-        bullet.x += data.vx * delta / 1000;
-        bullet.y += data.vy * delta / 1000;
+    if(isDead) return;
 
-        if (data.owner === playerId) {
-            updatePlayerData(ref(database, "bullets/" + id), {
-                x: bullet.x,
-                y: bullet.y
+    isDead=true;
+
+    localPlayer.scene.tweens.add({
+        targets: localPlayer,
+        angle:180,
+        scale:0,
+        duration:800
+    });
+
+    update(ref(database,"players/"+playerId),{ alive:false });
+
+    setTimeout(()=>{
+
+        playerHP=5;
+        isDead=false;
+        localPlayer.setScale(1);
+        localPlayer.setAngle(0);
+        localPlayer.x=400;
+        localPlayer.y=300;
+
+        if(lastHitBy){
+
+            const killerScoreRef = ref(database,"players/"+lastHitBy+"/score");
+
+            runTransaction(killerScoreRef,(current)=>{
+                return (current||0)+1;
             });
+        }
+
+        lastHitBy=null;
+
+        update(ref(database,"players/"+playerId),{
+            x:400,
+            y:300,
+            hp:5,
+            alive:true
+        });
+
+    },3000);
+}
+
+/* ================= UPDATE ================= */
+
+function gameUpdate(time,delta){
+
+    localPlayer.body.setVelocity(0);
+
+    if(playerHP>0){
+        if(cursors.A.isDown) localPlayer.body.setVelocityX(-300);
+        if(cursors.D.isDown) localPlayer.body.setVelocityX(300);
+        if(cursors.W.isDown) localPlayer.body.setVelocityY(-300);
+        if(cursors.S.isDown) localPlayer.body.setVelocityY(300);
+    }
+
+    bulletGroup.getChildren().forEach(bullet=>{
+
+        if(bullet.owner===playerId) return;
+        if(playerHP<=0) return;
+
+        const dist=Phaser.Math.Distance.Between(
+            bullet.x,bullet.y,
+            localPlayer.x,localPlayer.y
+        );
+
+        if(dist<20){
+
+            lastHitBy=bullet.owner;
+            playerHP--;
+            lastCombatTime=time;
+
+            remove(ref(database,"bullets/"+bullet.firebaseId));
+
+            if(playerHP<=0){
+                handleDeath();
+            }
+        }
+    });
+
+    /* HP REGEN */
+
+    if(playerHP>0 && playerHP<5){
+
+        if(time-lastCombatTime>7000){
+
+            regenTimer+=delta;
+
+            if(regenTimer>=3000){
+                playerHP++;
+                regenTimer=0;
+            }
         }
     }
 
-    /* ================= PLAYER NETWORK UPDATE ================= */
+    hpText.setText("HP:"+playerHP);
+    scoreText.setText("Score:"+score);
 
-    networkTimer += delta;
+    networkTimer+=delta;
 
-    if (networkTimer >= NETWORK_RATE) {
-
-        networkTimer = 0;
-
-        if (localPlayer.x !== lastPosition.x ||
-            localPlayer.y !== lastPosition.y) {
-
-            updatePlayerData(ref(database, "players/" + playerId), {
-                x: localPlayer.x,
-                y: localPlayer.y
-            });
-
-            lastPosition.x = localPlayer.x;
-            lastPosition.y = localPlayer.y;
-        }
+    if(networkTimer>=NETWORK_RATE){
+        networkTimer=0;
+        update(ref(database,"players/"+playerId),{
+            x:localPlayer.x,
+            y:localPlayer.y,
+            hp:playerHP,
+            score:score
+        });
     }
 }
 
-/* ================= INIT ================= */
+/* INIT */
 
-try {
-    await login();
-    createMenu();
-} catch (err) {
-    console.error(err);
-    alert("Firebase error — check console.");
-}
+await login();
+createMenu();
 
 </script>
-
 </head>
 <body style="margin:0; overflow:hidden;"></body>
 </html>
