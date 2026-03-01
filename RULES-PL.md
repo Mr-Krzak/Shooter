@@ -95,6 +95,15 @@
 * Rozmiar świata: 3000 x 3000 px
 * Kamera podąża za lokalnym graczem
 * Istnieją granice mapy
+* Gra toczy się nawet jeśli okno przeglądarki jest nieaktywne
+* Gracz pozostaje w grze do momentu wyjścia z gry (przycisk "Wyjście z Gry") lub nieaktywności przez 60 sekund (z widocznym odliczaniem).
+
+## Mini Mapa
+
+* W dolnym prawym rogu ekranu gry, wyswietla sie aktualna mini mapa
+* Mini mapa jest pomniejszonym widokiem areny na ktorej rozgrywa sie gra
+* Na mini mapie widac punkt w kolorze kazdego gracza w odpowiednim miejscu na mini mapie
+* Punkty przedstawiajace graczy przesuwaja sie razem z ruchem kazdego z graczy
 
 ---
 
