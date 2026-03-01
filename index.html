@@ -19,10 +19,11 @@ canvas {
     border: 2px solid #333;
     box-shadow: 0 0 20px rgba(0,0,0,0.8);
 }
+
+/* UI Nakładki */
 #loginBox {
     position: absolute;
-    top: 50%;
-    left: 50%;
+    top: 50%; left: 50%;
     transform: translate(-50%, -50%);
     background: #222;
     padding: 30px;
@@ -30,40 +31,36 @@ canvas {
     text-align: center;
     box-shadow: 0 0 15px rgba(0,0,0,0.8);
     border: 1px solid #444;
+    z-index: 100;
 }
-#loginBox input {
-    padding: 10px;
-    font-size: 16px;
-    width: 200px;
-    margin-bottom: 15px;
-    border: 1px solid #555;
-    background: #333;
+#loginBox input { padding: 10px; font-size: 16px; width: 200px; margin-bottom: 15px; border: 1px solid #555; background: #333; color: white; border-radius: 4px; }
+#loginBox button { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #ffaa00; border: none; font-weight: bold; border-radius: 5px; transition: background 0.2s; }
+#loginBox button:hover { background: #ffcc00; }
+
+#exitBtn {
+    position: absolute;
+    top: 20px; left: 50%;
+    transform: translateX(-50%);
+    display: none;
+    padding: 8px 16px;
+    background: #dd0000;
     color: white;
-    border-radius: 4px;
-}
-#loginBox button {
-    padding: 10px 20px;
-    font-size: 16px;
-    cursor: pointer;
-    background: #ffaa00;
-    border: none;
+    border: 2px solid #fff;
     font-weight: bold;
+    cursor: pointer;
     border-radius: 5px;
-    transition: background 0.2s;
+    z-index: 100;
 }
-#loginBox button:hover {
-    background: #ffcc00;
-}
+#exitBtn:hover { background: #ff0000; }
 </style>
 
 <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.js"></script>
-
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
 import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
 import { 
     getDatabase, ref, set, push, remove, update as fbUpdate,
-    onValue, onDisconnect, onChildAdded, onChildRemoved
+    onValue, onDisconnect, onChildAdded, onChildRemoved, get
 } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
 
 /* ================= FIREBASE CONFIG ================= */
@@ -78,7 +75,7 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const database = getDatabase(app);
 
-/* ================= GLOBAL VARIABLES ================= */
+/* ================= ZMIENNE GLOBALNE ================= */
 let playerId, playerName;
 let localPlayer, cursors, mousePointer;
 let walls, bulletsGroup;
@@ -91,91 +88,80 @@ let score = 0;
 let playerColor;
 
 let shootCooldown = false;
-let hpText, scoreText, leaderboardText;
+let hpText, scoreText, leaderboardText, afkText;
+let minimapBg, minimapGraphics;
 
 let networkTimer = 0;
-const NETWORK_RATE = 100; // wysyłanie pozycji co ~100ms
+const NETWORK_RATE = 100;
 let gameScene; 
 
-// Zmienne do mechaniki regeneracji
+// Trackers by omijać błędy przyznawania punktów i powtórzenia hitów
+let processedKills = {};
+let lastSeenHit = {};
+
+// Timery dla braku aktywności (AFK) i regeneracji HP (po walce)
 let lastActionTime = Date.now();
+let lastCombatTime = Date.now(); 
 let isRegenerating = false;
 let nextRegenTime = 0;
 
-/* ================= LOGIN & MENU ================= */
+/* ================= MENU I LOGOWANIE ================= */
 async function login() {
     try {
         const user = await signInAnonymously(auth);
         playerId = user.user.uid;
         createMenu();
     } catch (e) {
-        console.error("Firebase Login Error:", e);
         alert("Błąd logowania do Firebase!");
     }
 }
 
 function createMenu() {
-    const div = document.createElement("div");
+    const div = document.getElementById("loginBox") || document.createElement("div");
     div.id = "loginBox";
+    div.innerHTML = `
+        <h2>Arena Shooter 2D</h2>
+        <input type="text" id="nickInput" placeholder="Wpisz swój nick...">
+        <br><button id="joinBtn">Dołącz do Gry</button>
+    `;
+    document.body.appendChild(div);
 
-    const title = document.createElement("h2");
-    title.innerText = "Arena Shooter 2D";
-    
-    const input = document.createElement("input");
-    input.placeholder = "Wpisz swój nick...";
-
-    const btn = document.createElement("button");
-    btn.innerText = "Dołącz do Gry";
-
-    btn.onclick = () => {
-        playerName = input.value.trim();
+    document.getElementById("joinBtn").onclick = () => {
+        playerName = document.getElementById("nickInput").value.trim();
         if(!playerName) return alert("Musisz podać nick!");
         div.remove();
+        document.getElementById("exitBtn").style.display = "block";
         startGame();
     };
 
-    div.append(title, input, document.createElement("br"), btn);
-    document.body.appendChild(div);
+    document.getElementById("exitBtn").onclick = () => { window.location.reload(); };
 }
 
-/* ================= PHASER CONFIG & START ================= */
+/* ================= START GRY (PHASER) ================= */
 function startGame() {
     new Phaser.Game({
-        type: Phaser.AUTO,
-        width: 1200,
-        height: 800,
+        type: Phaser.AUTO, width: 1200, height: 800,
         physics: { default: "arcade", arcade: { debug: false } },
-        scene: { preload, create, update: gameUpdate }
+        scene: { preload: () => {}, create, update: gameUpdate }
     });
 }
 
-function preload() {}
-
-/* ================= CREATE (INICJALIZACJA ŚRODOWISKA) ================= */
 function create() {
     gameScene = this;
-
-    // Mapa 3000x3000
     this.physics.world.setBounds(0, 0, 3000, 3000);
     this.cameras.main.setBounds(0, 0, 3000, 3000);
-
-    // Tło siatki dla lepszej orientacji
     this.add.grid(1500, 1500, 3000, 3000, 100, 100, 0x111111, 1, 0x222222, 1);
 
-    // Generowanie tekstur
+    // Tekstury
     const bg = this.add.graphics();
-    bg.fillStyle(0xffff00, 1);
-    bg.fillCircle(6, 6, 6);
-    bg.generateTexture('bulletTex', 12, 12);
+    bg.fillStyle(0xffff00, 1).fillCircle(6, 6, 6).generateTexture('bulletTex', 12, 12);
     bg.destroy();
 
     const wg = this.add.graphics();
-    wg.fillStyle(0x555555, 1);
-    wg.fillRect(0, 0, 32, 32);
-    wg.generateTexture('wallTex', 32, 32);
+    wg.fillStyle(0x555555, 1).fillRect(0, 0, 32, 32).generateTexture('wallTex', 32, 32);
     wg.destroy();
 
-    // Gracz lokalny
+    // Inicjalizacja gracza
     playerColor = Phaser.Display.Color.RandomRGB().color;
     localPlayer = this.add.rectangle(1500, 1500, 32, 32, playerColor);
     this.physics.add.existing(localPlayer);
@@ -186,157 +172,132 @@ function create() {
     mousePointer = this.input.activePointer;
     this.input.on("pointerdown", () => shoot());
 
-    // Ściany statyczne
+    // Ściany
     walls = this.physics.add.staticGroup();
     createWall(this, 1500, 1000, 800, 40);
     createWall(this, 1500, 2000, 800, 40);
     createWall(this, 1000, 1500, 40, 800);
     createWall(this, 2000, 1500, 40, 800);
-
     this.physics.add.collider(localPlayer, walls);
 
-    // Pociski
+    // Pociski - tworzenie i niszczenie o ściany
     bulletsGroup = this.physics.add.group();
-
     this.physics.add.collider(bulletsGroup, walls, (bullet) => {
         remove(ref(database, "bullets/" + bullet.dbId)).catch(()=>{});
     });
 
-    // Wykrywanie trafienia (Overlap)
+    // Otrzymanie obrażeń od pocisku
     this.physics.add.overlap(localPlayer, bulletsGroup, (player, bullet) => {
         if(isDead || bullet.owner === playerId || bullet.hasHit) return; 
-        
         bullet.hasHit = true; 
         remove(ref(database, "bullets/" + bullet.dbId)).catch(()=>{});
-        
         takeDamage(bullet.owner, bullet.x, bullet.y);
     });
 
-    // === INTERFEJS UŻYTKOWNIKA (UI) ===
-    hpText = this.add.text(20, 20, "HP: 5", { 
-        fontSize: "32px", fill: "#ff4444", fontStyle: "bold", stroke: "#000", strokeThickness: 4 
-    }).setScrollFactor(0).setDepth(100);
-    
-    scoreText = this.add.text(20, 65, "Score: 0", { 
-        fontSize: "26px", fill: "#ffff00", fontStyle: "bold", stroke: "#000", strokeThickness: 4 
-    }).setScrollFactor(0).setDepth(100);
-    
-    leaderboardText = this.add.text(1180, 20, "ŁADOWANIE RANKINGU...", { 
-        fontSize: "20px", fill: "#ffffff", align: "right", stroke: "#000", strokeThickness: 3 
-    }).setScrollFactor(0).setDepth(100).setOrigin(1, 0); 
+    // === UI GŁÓWNE ===
+    hpText = this.add.text(20, 20, "HP: 5", { fontSize: "32px", fill: "#ff4444", fontStyle: "bold", stroke: "#000", strokeThickness: 4 }).setScrollFactor(0).setDepth(100);
+    scoreText = this.add.text(20, 65, "Score: 0", { fontSize: "26px", fill: "#ffff00", fontStyle: "bold", stroke: "#000", strokeThickness: 4 }).setScrollFactor(0).setDepth(100);
+    leaderboardText = this.add.text(1180, 20, "RANKING...", { fontSize: "20px", fill: "#ffffff", align: "right", stroke: "#000", strokeThickness: 3 }).setScrollFactor(0).setDepth(100).setOrigin(1, 0); 
+    afkText = this.add.text(600, 100, "", { fontSize: "28px", fill: "#ff0000", fontStyle: "bold", stroke: "#000", strokeThickness: 4 }).setScrollFactor(0).setDepth(100).setOrigin(0.5);
 
-    // Firebase - Rejestracja gracza w bazie
+    // === MINI MAPA (Zgodnie z wymogami) ===
+    minimapBg = this.add.rectangle(1080, 680, 200, 200, 0x111111, 0.8).setScrollFactor(0).setDepth(100);
+    minimapBg.setStrokeStyle(3, 0x444444);
+    minimapGraphics = this.add.graphics().setScrollFactor(0).setDepth(101);
+
+    /* === FIREBASE - ZAPIS GRACZA DO BAZY === */
     const playerRef = ref(database, "players/" + playerId);
-    set(playerRef, {
-        name: playerName,
-        x: 1500, y: 1500,
-        hp: 5,
-        alive: true,
-        score: 0,
-        color: playerColor
+    get(playerRef).then((snapshot) => {
+        const existingData = snapshot.val() || {};
+        score = existingData.score || 0;
+        playerColor = existingData.color || playerColor;
+        localPlayer.fillColor = playerColor; // Aktualizuj barwę, jeśli została z poprzedniej sesji
+
+        set(playerRef, {
+            name: playerName,
+            x: localPlayer.x, y: localPlayer.y,
+            hp: 5, alive: true, score: score, color: playerColor
+        });
     });
 
     onDisconnect(playerRef).remove();
 
-    /* --- SYNCHRONIZACJA RANKINGU I GRACZY --- */
+    /* === GŁÓWNA PĘTLA NASŁUCHIWANIA NA INNYCH (BEZPIECZNA PRZED REGELAMI) === */
     onValue(ref(database, "players"), snapshot => {
         const players = snapshot.val();
         if(!players) return;
 
-        // 🏆 Aktualizacja własnego wyniku w tle
+        // 1. Zabezpieczony Update Rankingu
         if (players[playerId]) {
             score = players[playerId].score || 0;
             scoreText.setText("Score: " + score);
         }
 
-        // 🏆 Sortowanie i wyświetlanie Leaderboardu
-        const sorted = Object.values(players)
-            .filter(p => p.name) 
-            .sort((a,b) => (b.score || 0) - (a.score || 0));
-
+        const sorted = Object.values(players).filter(p => p.name).sort((a,b) => (b.score || 0) - (a.score || 0));
         let text = "🏆 RANKING GRACZY\n\n";
-        sorted.forEach((p, index) => {
-            let rankStr = `${index + 1}. ${p.name}: ${p.score || 0} pkt`;
-            text += rankStr + "\n";
-        });
+        sorted.forEach((p, index) => { text += `${index + 1}. ${p.name}: ${p.score || 0} pkt\n`; });
         leaderboardText.setText(text);
 
+        // Usuń odłączonych
         for(let id in otherPlayers) {
-            if(!players[id]) {
-                otherPlayers[id].destroy();
-                delete otherPlayers[id];
-            }
+            if(!players[id]) { otherPlayers[id].destroy(); delete otherPlayers[id]; }
         }
 
+        // 2. Parsowanie pozostałych graczy
         for(let id in players) {
+            const p = players[id];
+
+            // --- A) WYKRYWANIE EFEKTÓW TRAFIENIA (bez użycia tabeli /hits) ---
+            if (p.lastHit && p.lastHit.time > (lastSeenHit[id] || 0)) {
+                lastSeenHit[id] = p.lastHit.time;
+                if (Date.now() - p.lastHit.time < 2000) { playHitEffect(p.lastHit.x, p.lastHit.y); }
+            }
+
+            // --- B) NALICZANIE PUNKTÓW (Bez użycia tabeli /deaths - omijamy limity Firebase) ---
+            // Jeśli Ofiara umarła, a Ja jestem jej zabójcą, SAM dodaję sobie punkt!
+            if (p.lastDeath && p.lastDeath.killerId === playerId) {
+                if (!processedKills[p.lastDeath.time]) {
+                    processedKills[p.lastDeath.time] = true;
+                    score += 1;
+                    scoreText.setText("Score: " + score);
+                    fbUpdate(ref(database, "players/" + playerId), { score: score }); // To przejdzie, bo to MÓJ profil!
+                }
+            }
+
+            // Renderuj innych graczy (pomiń renderowanie siebie 2 razy)
             if(id === playerId) continue; 
 
             if(!otherPlayers[id]) {
-                otherPlayers[id] = gameScene.add.rectangle(players[id].x, players[id].y, 32, 32, players[id].color);
+                otherPlayers[id] = gameScene.add.rectangle(p.x, p.y, 32, 32, p.color);
                 otherPlayers[id].isAlive = true;
             }
 
-            if (players[id].alive === false && otherPlayers[id].isAlive) {
+            // Animacje śmierci u przeciwników
+            if (p.alive === false && otherPlayers[id].isAlive) {
                 otherPlayers[id].isAlive = false;
-                gameScene.tweens.add({
-                    targets: otherPlayers[id], scaleX: 1.5, scaleY: 1.5, alpha: 0, duration: 500
-                });
-            } else if (players[id].alive === true && !otherPlayers[id].isAlive) {
+                gameScene.tweens.add({ targets: otherPlayers[id], scaleX: 1.5, scaleY: 1.5, alpha: 0, duration: 500 });
+            } else if (p.alive === true && !otherPlayers[id].isAlive) {
                 otherPlayers[id].isAlive = true;
-                otherPlayers[id].scaleX = 1;
-                otherPlayers[id].scaleY = 1;
-                otherPlayers[id].alpha = 1;
+                otherPlayers[id].scaleX = 1; otherPlayers[id].scaleY = 1; otherPlayers[id].alpha = 1;
             }
 
-            otherPlayers[id].x = players[id].x;
-            otherPlayers[id].y = players[id].y;
+            otherPlayers[id].x = p.x;
+            otherPlayers[id].y = p.y;
+            otherPlayers[id].fillColor = p.color; // Pewność spójności koloru na mapie!
         }
     });
 
     /* --- SYNCHRONIZACJA POCISKÓW --- */
     onChildAdded(ref(database, "bullets"), snapshot => {
         const data = snapshot.val();
-        const id = snapshot.key;
-
         const b = bulletsGroup.create(data.x, data.y, 'bulletTex');
-        b.body.setCircle(6);
-        b.body.setVelocity(data.vx, data.vy);
-        b.body.setAllowGravity(false);
-        b.owner = data.owner;
-        b.dbId = id;
-        bullets[id] = b;
+        b.body.setCircle(6); b.body.setVelocity(data.vx, data.vy); b.body.setAllowGravity(false);
+        b.owner = data.owner; b.dbId = snapshot.key;
+        bullets[snapshot.key] = b;
     });
 
     onChildRemoved(ref(database, "bullets"), snapshot => {
-        const id = snapshot.key;
-        if(bullets[id]) {
-            bullets[id].destroy();
-            delete bullets[id];
-        }
-    });
-
-    /* --- GLOBALNA SYNCHRONIZACJA EFEKTÓW TRAFIENIA --- */
-    onChildAdded(ref(database, "hits"), snapshot => {
-        const data = snapshot.val();
-        if (Date.now() - data.time < 2000) {
-            playHitEffect(data.x, data.y);
-        }
-    });
-
-    /* --- SYSTEM PRZYZNAWANIA PUNKTÓW (Killer aktualizuje własne konto) --- */
-    let isReadyForKills = false;
-    setTimeout(() => isReadyForKills = true, 2000); // Zapobiega czytaniu starych zgonów przy ładowaniu strony
-
-    onChildAdded(ref(database, "deaths"), snapshot => {
-        if (!isReadyForKills) return; // Pomijamy historyczne zgony na start
-
-        const data = snapshot.val();
-        // Jeśli to MY zabiliśmy, samodzielnie i bezpiecznie powiększamy NASZ wynik
-        if (data.killer === playerId) {
-            score += 1;
-            scoreText.setText("Score: " + score);
-            fbUpdate(ref(database, "players/" + playerId), { score: score });
-        }
+        if(bullets[snapshot.key]) { bullets[snapshot.key].destroy(); delete bullets[snapshot.key]; }
     });
 }
 
@@ -351,15 +312,28 @@ function takeDamage(killerId, hitX, hitY) {
     if (isDead) return;
 
     playerHP -= 1;
-    lastActionTime = Date.now(); 
+    lastCombatTime = Date.now(); // Reset czasu do leczenia
+    lastActionTime = Date.now(); // Reset czasu AFK
     
-    // Rozgłoszenie efektu trafienia
-    push(ref(database, "hits"), { target: playerId, shooter: killerId, x: hitX, y: hitY, time: Date.now() });
-
     if (playerHP <= 0) {
-        die(killerId);
+        isDead = true;
+        playerHP = 0;
+        localPlayer.body.enable = false;
+
+        // Ofiara publikuje SWOJĄ śmierć i kim był zabójca we WŁASNYM obiekcie bazy.
+        fbUpdate(ref(database, "players/" + playerId), { 
+            hp: 0, alive: false, 
+            lastHit: { x: hitX, y: hitY, time: Date.now() },
+            lastDeath: { killerId: killerId, time: Date.now() }
+        });
+
+        gameScene.tweens.add({
+            targets: localPlayer, scaleX: 1.5, scaleY: 1.5, alpha: 0, duration: 500,
+            onComplete: () => { setTimeout(() => respawn(), 3000); }
+        });
     } else {
-        fbUpdate(ref(database, "players/" + playerId), { hp: playerHP });
+        // Publikuje że obrywa aby inni na mapie widzieli efekt!
+        fbUpdate(ref(database, "players/" + playerId), { hp: playerHP, lastHit: { x: hitX, y: hitY, time: Date.now() } });
     }
 }
 
@@ -371,42 +345,19 @@ function playHitEffect(x, y) {
     });
 }
 
-function die(killerId) {
-    isDead = true;
-    playerHP = 0;
-    localPlayer.body.enable = false;
-
-    // OFIARA OGŁASZA ŚMIERĆ (wywoła to u zabójcy "onChildAdded" i zabójca doda sobie punkt)
-    push(ref(database, "deaths"), { victim: playerId, killer: killerId, time: Date.now() });
-
-    fbUpdate(ref(database, "players/" + playerId), { hp: 0, alive: false });
-
-    // Animacja
-    gameScene.tweens.add({
-        targets: localPlayer, scaleX: 1.5, scaleY: 1.5, alpha: 0,
-        duration: 500,
-        onComplete: () => {
-            setTimeout(() => respawn(), 3000);
-        }
-    });
-}
-
 function respawn() {
     isDead = false;
     playerHP = 5;
-    lastActionTime = Date.now(); 
+    lastCombatTime = Date.now(); 
+    lastActionTime = Date.now();
     
     localPlayer.x = 400 + Math.random() * 2000; 
     localPlayer.y = 400 + Math.random() * 2000;
     
-    localPlayer.scaleX = 1;
-    localPlayer.scaleY = 1;
-    localPlayer.alpha = 1;
+    localPlayer.scaleX = 1; localPlayer.scaleY = 1; localPlayer.alpha = 1;
     localPlayer.body.enable = true;
 
-    fbUpdate(ref(database, "players/" + playerId), {
-        hp: playerHP, alive: true, x: localPlayer.x, y: localPlayer.y
-    });
+    fbUpdate(ref(database, "players/" + playerId), { hp: playerHP, alive: true, x: localPlayer.x, y: localPlayer.y });
 }
 
 /* ================= STRZELANIE ================= */
@@ -415,6 +366,7 @@ function shoot() {
 
     shootCooldown = true;
     setTimeout(() => shootCooldown = false, 350); 
+    lastCombatTime = Date.now(); 
     lastActionTime = Date.now(); 
 
     const speed = 900;
@@ -423,43 +375,32 @@ function shoot() {
     const len = Math.sqrt(dx*dx + dy*dy);
     if(len === 0) return;
 
-    const vx = (dx / len) * speed;
-    const vy = (dy / len) * speed;
-
     const bulletRef = push(ref(database, "bullets"));
+    set(bulletRef, { owner: playerId, x: localPlayer.x, y: localPlayer.y, vx: (dx/len)*speed, vy: (dy/len)*speed });
 
-    set(bulletRef, {
-        owner: playerId,
-        x: localPlayer.x, y: localPlayer.y,
-        vx, vy
-    });
-
-    setTimeout(() => {
-        remove(bulletRef).catch(()=>{});
-    }, 2000);
+    setTimeout(() => { remove(bulletRef).catch(()=>{}); }, 2000);
 }
 
-/* ================= GŁÓWNA PĘTLA GRY ================= */
+/* ================= GŁÓWNA PĘTLA UPDATE GRY ================= */
 function gameUpdate(time, delta) {
     if (!localPlayer) return;
 
     localPlayer.body.setVelocity(0);
+    let isMoving = false;
 
     if (!isDead) {
-        if(cursors.A.isDown) localPlayer.body.setVelocityX(-300);
-        if(cursors.D.isDown) localPlayer.body.setVelocityX(300);
-        if(cursors.W.isDown) localPlayer.body.setVelocityY(-300);
-        if(cursors.S.isDown) localPlayer.body.setVelocityY(300);
+        if(cursors.A.isDown) { localPlayer.body.setVelocityX(-300); isMoving = true; }
+        if(cursors.D.isDown) { localPlayer.body.setVelocityX(300); isMoving = true; }
+        if(cursors.W.isDown) { localPlayer.body.setVelocityY(-300); isMoving = true; }
+        if(cursors.S.isDown) { localPlayer.body.setVelocityY(300); isMoving = true; }
 
-        // --- MECHANIKA REGENERACJI HP ---
+        if (isMoving) lastActionTime = Date.now(); // Resetuj AFK jak gracz się rusza
+
+        // === SYSTEM REGENERACJI ZDROWIA (Tylko walka przerywa) ===
         const now = Date.now();
         if (playerHP > 0 && playerHP < 5) {
-            if (now - lastActionTime >= 6000) { 
-                if (!isRegenerating) {
-                    isRegenerating = true;
-                    nextRegenTime = now; 
-                }
-
+            if (now - lastCombatTime >= 6000) { 
+                if (!isRegenerating) { isRegenerating = true; nextRegenTime = now; }
                 if (now >= nextRegenTime) {
                     playerHP = Math.min(5, playerHP + 1);
                     nextRegenTime = now + 3000; 
@@ -473,20 +414,46 @@ function gameUpdate(time, delta) {
 
     hpText.setText("HP: " + playerHP);
 
+    // === ZARZĄDZANIE AFK (60 SEKUND) ===
+    const idleTime = Date.now() - lastActionTime;
+    if (idleTime > 50000) {
+        let timeLeft = 60 - Math.floor(idleTime / 1000);
+        afkText.setText(`Zbyt długi brak aktywności! Rozłączenie za: ${timeLeft}s`);
+        if (timeLeft <= 0) window.location.reload(); // Wyrzuca z gry i przerywa sesje
+    } else {
+        afkText.setText("");
+    }
+
+    // === RYSOWANIE MINI MAPY ===
+    minimapGraphics.clear();
+    const mmX = 1080 - 100; // Pozycja X siatki
+    const mmY = 680 - 100;  // Pozycja Y siatki
+
+    // Rysuj siebie
+    minimapGraphics.fillStyle(playerColor, 1);
+    minimapGraphics.fillCircle(mmX + (localPlayer.x / 3000) * 200, mmY + (localPlayer.y / 3000) * 200, 4);
+    
+    // Rysuj Innych Graczy
+    for(let id in otherPlayers) {
+        let op = otherPlayers[id];
+        if(op.isAlive) {
+            minimapGraphics.fillStyle(op.fillColor, 1);
+            minimapGraphics.fillCircle(mmX + (op.x / 3000) * 200, mmY + (op.y / 3000) * 200, 4);
+        }
+    }
+
+    // === WYSYŁANIE POZYCJI DO BAZY ===
     networkTimer += delta;
     if (networkTimer >= NETWORK_RATE && !isDead) {
         networkTimer = 0;
-        fbUpdate(ref(database, "players/" + playerId), {
-            x: Math.round(localPlayer.x),
-            y: Math.round(localPlayer.y)
-        });
+        fbUpdate(ref(database, "players/" + playerId), { x: Math.round(localPlayer.x), y: Math.round(localPlayer.y) });
     }
 }
 
-/* ROZPOCZĘCIE */
 login();
-
 </script>
 </head>
-<body></body>
+<body>
+    <button id="exitBtn">Wyjście z Gry</button>
+</body>
 </html>
