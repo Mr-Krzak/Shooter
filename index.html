@@ -1,474 +1,492 @@
 <!DOCTYPE html>
-<html>
+<html lang="pl">
 <head>
 <meta charset="UTF-8">
 <title>Phaser Multiplayer Shooter</title>
 
+<style>
+body {
+    margin: 0;
+    overflow: hidden;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: #111;
+    color: white;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+canvas {
+    border: 2px solid #333;
+    box-shadow: 0 0 20px rgba(0,0,0,0.8);
+}
+#loginBox {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #222;
+    padding: 30px;
+    border-radius: 10px;
+    text-align: center;
+    box-shadow: 0 0 15px rgba(0,0,0,0.8);
+    border: 1px solid #444;
+}
+#loginBox input {
+    padding: 10px;
+    font-size: 16px;
+    width: 200px;
+    margin-bottom: 15px;
+    border: 1px solid #555;
+    background: #333;
+    color: white;
+    border-radius: 4px;
+}
+#loginBox button {
+    padding: 10px 20px;
+    font-size: 16px;
+    cursor: pointer;
+    background: #ffaa00;
+    border: none;
+    font-weight: bold;
+    border-radius: 5px;
+    transition: background 0.2s;
+}
+#loginBox button:hover {
+    background: #ffcc00;
+}
+</style>
+
 <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.js"></script>
 
 <script type="module">
-
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
 import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
 import { 
-    getDatabase, 
-    ref, 
-    set, 
-    push,
-    remove,
-    update,
-    onValue, 
-    onDisconnect,
-    runTransaction
+    getDatabase, ref, set, push, remove, update as fbUpdate,
+    onValue, onDisconnect, onChildAdded, onChildRemoved
 } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
 
 /* ================= FIREBASE CONFIG ================= */
-
 const firebaseConfig = {
   apiKey: "AIzaSyC77CXjhgwuiNqS9QxOHd8Tf8SPwEzFoHM",
   authDomain: "phaser-multiplayer-game-52eaa.firebaseapp.com",
   databaseURL: "https://phaser-multiplayer-game-52eaa-default-rtdb.europe-west1.firebasedatabase.app",
-  projectId: "phaser-multiplayer-game-52eaa",
-  storageBucket: "phaser-multiplayer-game-52eaa.firebasestorage.app",
-  messagingSenderId: "902358290008",
-  appId: "1:902358290008:web:685e8d667957a9537e842d"
+  projectId: "phaser-multiplayer-game-52eaa"
 };
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const database = getDatabase(app);
 
-/* ================= GLOBAL ================= */
-
-let playerId;
-let playerName;
-let localPlayer;
-let cursors;
-let mousePointer;
-let walls;
-let bulletGroup;
+/* ================= GLOBAL VARIABLES ================= */
+let playerId, playerName;
+let localPlayer, cursors, mousePointer;
+let walls, bulletsGroup;
 let otherPlayers = {};
+let bullets = {};
+
 let playerHP = 5;
 let isDead = false;
-let lastHitBy = null;
 let score = 0;
+let playerColor;
 
-let lastCombatTime = 0;
-let regenTimer = 0;
-let grenadeCooldown = false;
-
-let hpText;
-let scoreText;
-let leaderboardText;
+let shootCooldown = false;
+let hpText, scoreText, leaderboardText;
 
 let networkTimer = 0;
-const NETWORK_RATE = 100;
+const NETWORK_RATE = 100; // wysyłanie pozycji co ~100ms
+let gameScene; 
 
-/* ================= LOGIN ================= */
+// Zmienne do mechaniki regeneracji
+let lastActionTime = Date.now();
+let isRegenerating = false;
+let nextRegenTime = 0;
 
+/* ================= LOGIN & MENU ================= */
 async function login() {
-    const user = await signInAnonymously(auth);
-    playerId = user.user.uid;
+    try {
+        const user = await signInAnonymously(auth);
+        playerId = user.user.uid;
+        createMenu();
+    } catch (e) {
+        console.error("Firebase Login Error:", e);
+        alert("Błąd logowania do Firebase!");
+    }
 }
-
-/* ================= MENU ================= */
 
 function createMenu() {
     const div = document.createElement("div");
-    div.style.position="absolute";
-    div.style.top="50%";
-    div.style.left="50%";
-    div.style.transform="translate(-50%,-50%)";
+    div.id = "loginBox";
 
-    const input=document.createElement("input");
-    input.placeholder="Enter name";
+    const title = document.createElement("h2");
+    title.innerText = "Arena Shooter 2D";
+    
+    const input = document.createElement("input");
+    input.placeholder = "Wpisz swój nick...";
 
-    const btn=document.createElement("button");
-    btn.innerText="Join";
+    const btn = document.createElement("button");
+    btn.innerText = "Dołącz do Gry";
 
-    btn.onclick=()=>{
-        playerName=input.value.trim();
-        if(!playerName) return alert("Enter name");
+    btn.onclick = () => {
+        playerName = input.value.trim();
+        if(!playerName) return alert("Musisz podać nick!");
         div.remove();
         startGame();
     };
 
-    div.append(input,document.createElement("br"),document.createElement("br"),btn);
+    div.append(title, input, document.createElement("br"), btn);
     document.body.appendChild(div);
 }
 
-/* ================= START ================= */
-
-function startGame(){
-
+/* ================= PHASER CONFIG & START ================= */
+function startGame() {
     new Phaser.Game({
-        type:Phaser.AUTO,
-        width:1200,
-        height:800,
-        physics:{ default:"arcade", arcade:{ debug:false } },
-        scene:{ preload,create,update:gameUpdate }
+        type: Phaser.AUTO,
+        width: 1200,
+        height: 800,
+        physics: { default: "arcade", arcade: { debug: false } },
+        scene: { preload, create, update: gameUpdate }
     });
 }
 
-/* ================= CREATE ================= */
+function preload() {}
 
-function preload(){}
+/* ================= CREATE (INICJALIZACJA ŚRODOWISKA) ================= */
+function create() {
+    gameScene = this;
 
-function create(){
+    // Mapa 3000x3000
+    this.physics.world.setBounds(0, 0, 3000, 3000);
+    this.cameras.main.setBounds(0, 0, 3000, 3000);
 
-    this.physics.world.setBounds(0,0,3000,3000);
-    this.cameras.main.setBounds(0,0,3000,3000);
+    // Tło siatki dla lepszej orientacji
+    this.add.grid(1500, 1500, 3000, 3000, 100, 100, 0x111111, 1, 0x222222, 1);
 
-    /* BULLET TEXTURE */
+    // Generowanie tekstur
+    const bg = this.add.graphics();
+    bg.fillStyle(0xffff00, 1);
+    bg.fillCircle(6, 6, 6);
+    bg.generateTexture('bulletTex', 12, 12);
+    bg.destroy();
 
-    const g = this.add.graphics();
-    g.fillStyle(0xffff00,1);
-    g.fillCircle(8,8,8);
-    g.generateTexture('bulletTexture',16,16);
-    g.destroy();
+    const wg = this.add.graphics();
+    wg.fillStyle(0x555555, 1);
+    wg.fillRect(0, 0, 32, 32);
+    wg.generateTexture('wallTex', 32, 32);
+    wg.destroy();
 
-    /* PLAYER */
-
-    const playerColor = Phaser.Display.Color.RandomRGB().color;
-
-    localPlayer=this.add.rectangle(400,300,32,32,playerColor);
+    // Gracz lokalny
+    playerColor = Phaser.Display.Color.RandomRGB().color;
+    localPlayer = this.add.rectangle(1500, 1500, 32, 32, playerColor);
     this.physics.add.existing(localPlayer);
     localPlayer.body.setCollideWorldBounds(true);
     this.cameras.main.startFollow(localPlayer);
 
-    cursors=this.input.keyboard.addKeys("W,A,S,D");
-    mousePointer=this.input.activePointer;
-    this.input.on("pointerdown",()=>shoot());
+    cursors = this.input.keyboard.addKeys("W,A,S,D");
+    mousePointer = this.input.activePointer;
+    this.input.on("pointerdown", () => shoot());
 
-    this.input.keyboard.on("keydown-G",()=>throwGrenade());
+    // Ściany statyczne
+    walls = this.physics.add.staticGroup();
+    createWall(this, 1500, 1000, 800, 40);
+    createWall(this, 1500, 2000, 800, 40);
+    createWall(this, 1000, 1500, 40, 800);
+    createWall(this, 2000, 1500, 40, 800);
 
-    /* WALLS */
+    this.physics.add.collider(localPlayer, walls);
 
-    walls=this.physics.add.staticGroup();
+    // Pociski
+    bulletsGroup = this.physics.add.group();
 
-    const createWall=(x,y,w,h)=>{
-        const wall=this.add.rectangle(x,y,w,h,0x444444);
-        this.physics.add.existing(wall,true);
-        walls.add(wall);
-    };
-
-    createWall(600,600,500,40);
-    createWall(1200,900,40,600);
-    createWall(1800,1500,700,40);
-    createWall(2400,2000,40,800);
-    createWall(800,2200,400,40);
-    createWall(1500,500,300,40);
-    createWall(2600,1000,500,40);
-    createWall(1000,1700,40,500);
-
-    this.physics.add.collider(localPlayer,walls);
-
-    /* BULLETS */
-
-    bulletGroup = this.physics.add.group();
-
-    this.physics.add.collider(bulletGroup, walls, (bullet)=>{
-        remove(ref(database,"bullets/"+bullet.firebaseId));
+    this.physics.add.collider(bulletsGroup, walls, (bullet) => {
+        remove(ref(database, "bullets/" + bullet.dbId)).catch(()=>{});
     });
 
-    /* TRAIL */
+    // Wykrywanie trafienia (Overlap)
+    this.physics.add.overlap(localPlayer, bulletsGroup, (player, bullet) => {
+        if(isDead || bullet.owner === playerId || bullet.hasHit) return; 
+        
+        bullet.hasHit = true; 
+        remove(ref(database, "bullets/" + bullet.dbId)).catch(()=>{});
+        
+        takeDamage(bullet.owner, bullet.x, bullet.y);
+    });
 
-    const particles = this.add.particles('bulletTexture');
-    particles.setBlendMode(Phaser.BlendModes.ADD);
+    // === INTERFEJS UŻYTKOWNIKA (UI) ===
+    hpText = this.add.text(20, 20, "HP: 5", { 
+        fontSize: "32px", fill: "#ff4444", fontStyle: "bold", stroke: "#000", strokeThickness: 4 
+    }).setScrollFactor(0).setDepth(100);
+    
+    scoreText = this.add.text(20, 65, "Score: 0", { 
+        fontSize: "26px", fill: "#ffff00", fontStyle: "bold", stroke: "#000", strokeThickness: 4 
+    }).setScrollFactor(0).setDepth(100);
+    
+    leaderboardText = this.add.text(1180, 20, "ŁADOWANIE RANKINGU...", { 
+        fontSize: "20px", fill: "#ffffff", align: "right", stroke: "#000", strokeThickness: 3 
+    }).setScrollFactor(0).setDepth(100).setOrigin(1, 0); 
 
-    /* UI */
-
-    hpText=this.add.text(20,20,"HP:5",{fontSize:"22px"}).setScrollFactor(0);
-    scoreText=this.add.text(20,50,"Score:0",{fontSize:"22px"}).setScrollFactor(0);
-    leaderboardText=this.add.text(1000,20,"",{fontSize:"18px"}).setScrollFactor(0);
-
-    /* FIREBASE PLAYER */
-
-    const playerRef=ref(database,"players/"+playerId);
-
-    set(playerRef,{
-        name:playerName,
-        x:400,
-        y:300,
-        hp:5,
-        alive:true,
-        score:0,
-        color:playerColor
+    // Firebase - Rejestracja gracza w bazie
+    const playerRef = ref(database, "players/" + playerId);
+    set(playerRef, {
+        name: playerName,
+        x: 1500, y: 1500,
+        hp: 5,
+        alive: true,
+        score: 0,
+        color: playerColor
     });
 
     onDisconnect(playerRef).remove();
 
-    /* PLAYERS SYNC */
-
-    onValue(ref(database,"players"),snapshot=>{
-        const players=snapshot.val();
+    /* --- SYNCHRONIZACJA RANKINGU I GRACZY --- */
+    onValue(ref(database, "players"), snapshot => {
+        const players = snapshot.val();
         if(!players) return;
 
-        const sorted = Object.values(players)
-            .sort((a,b)=> (b.score||0)-(a.score||0))
-            .slice(0,10);
+        // 🏆 Aktualizacja własnego wyniku w tle
+        if (players[playerId]) {
+            score = players[playerId].score || 0;
+            scoreText.setText("Score: " + score);
+        }
 
-        let text="TOP 10\n";
-        sorted.forEach(p=>{
-            text+=p.name+" : "+(p.score||0)+"\n";
+        // 🏆 Sortowanie i wyświetlanie Leaderboardu
+        const sorted = Object.values(players)
+            .filter(p => p.name) 
+            .sort((a,b) => (b.score || 0) - (a.score || 0));
+
+        let text = "🏆 RANKING GRACZY\n\n";
+        sorted.forEach((p, index) => {
+            let rankStr = `${index + 1}. ${p.name}: ${p.score || 0} pkt`;
+            text += rankStr + "\n";
         });
         leaderboardText.setText(text);
 
-        for(let id in otherPlayers){
-            if(!players[id]){
+        for(let id in otherPlayers) {
+            if(!players[id]) {
                 otherPlayers[id].destroy();
                 delete otherPlayers[id];
             }
         }
 
-        for(let id in players){
+        for(let id in players) {
+            if(id === playerId) continue; 
 
-            if(id===playerId){
-                score = players[id].score || 0;
-                continue;
+            if(!otherPlayers[id]) {
+                otherPlayers[id] = gameScene.add.rectangle(players[id].x, players[id].y, 32, 32, players[id].color);
+                otherPlayers[id].isAlive = true;
             }
 
-            const data=players[id];
-
-            if(!otherPlayers[id]){
-                otherPlayers[id]=this.add.rectangle(
-                    data.x,data.y,32,32,
-                    data.alive?data.color:0x555555
-                );
+            if (players[id].alive === false && otherPlayers[id].isAlive) {
+                otherPlayers[id].isAlive = false;
+                gameScene.tweens.add({
+                    targets: otherPlayers[id], scaleX: 1.5, scaleY: 1.5, alpha: 0, duration: 500
+                });
+            } else if (players[id].alive === true && !otherPlayers[id].isAlive) {
+                otherPlayers[id].isAlive = true;
+                otherPlayers[id].scaleX = 1;
+                otherPlayers[id].scaleY = 1;
+                otherPlayers[id].alpha = 1;
             }
 
-            otherPlayers[id].x=data.x;
-            otherPlayers[id].y=data.y;
-            otherPlayers[id].setFillStyle(data.alive?data.color:0x555555);
+            otherPlayers[id].x = players[id].x;
+            otherPlayers[id].y = players[id].y;
         }
     });
 
-    /* BULLET SYNC */
+    /* --- SYNCHRONIZACJA POCISKÓW --- */
+    onChildAdded(ref(database, "bullets"), snapshot => {
+        const data = snapshot.val();
+        const id = snapshot.key;
 
-    onValue(ref(database,"bullets"),snapshot=>{
-        const data=snapshot.val();
-        if(!data) return;
+        const b = bulletsGroup.create(data.x, data.y, 'bulletTex');
+        b.body.setCircle(6);
+        b.body.setVelocity(data.vx, data.vy);
+        b.body.setAllowGravity(false);
+        b.owner = data.owner;
+        b.dbId = id;
+        bullets[id] = b;
+    });
 
-        bulletGroup.clear(true,true);
-
-        for(let id in data){
-
-            const b=bulletGroup.create(data[id].x,data[id].y,'bulletTexture');
-            b.setScale(0.8);
-            b.body.setAllowGravity(false);
-            b.body.setCircle(8);
-            b.body.velocity.x=data[id].vx;
-            b.body.velocity.y=data[id].vy;
-            b.owner=data[id].owner;
-            b.firebaseId=id;
-
-            particles.startFollow(b,0,0,1);
+    onChildRemoved(ref(database, "bullets"), snapshot => {
+        const id = snapshot.key;
+        if(bullets[id]) {
+            bullets[id].destroy();
+            delete bullets[id];
         }
     });
 
-    /* GRENADE SYNC */
+    /* --- GLOBALNA SYNCHRONIZACJA EFEKTÓW TRAFIENIA --- */
+    onChildAdded(ref(database, "hits"), snapshot => {
+        const data = snapshot.val();
+        if (Date.now() - data.time < 2000) {
+            playHitEffect(data.x, data.y);
+        }
+    });
 
-    onValue(ref(database,"grenades"),snapshot=>{
-        const data=snapshot.val();
-        if(!data) return;
+    /* --- SYSTEM PRZYZNAWANIA PUNKTÓW (Killer aktualizuje własne konto) --- */
+    let isReadyForKills = false;
+    setTimeout(() => isReadyForKills = true, 2000); // Zapobiega czytaniu starych zgonów przy ładowaniu strony
 
-        for(let id in data){
+    onChildAdded(ref(database, "deaths"), snapshot => {
+        if (!isReadyForKills) return; // Pomijamy historyczne zgony na start
 
-            const g=data[id];
-
-            const circle=this.add.circle(g.x,g.y,60,0xff0000,0.3);
-
-            this.time.delayedCall(300,()=>{
-
-                if(g.owner!==playerId && playerHP>0){
-
-                    const dist=Phaser.Math.Distance.Between(
-                        g.x,g.y,
-                        localPlayer.x,localPlayer.y
-                    );
-
-                    if(dist<60){
-                        playerHP--;
-                        lastCombatTime=this.time.now;
-                        if(playerHP<=0) handleDeath();
-                    }
-                }
-
-                circle.destroy();
-            });
+        const data = snapshot.val();
+        // Jeśli to MY zabiliśmy, samodzielnie i bezpiecznie powiększamy NASZ wynik
+        if (data.killer === playerId) {
+            score += 1;
+            scoreText.setText("Score: " + score);
+            fbUpdate(ref(database, "players/" + playerId), { score: score });
         }
     });
 }
 
-/* ================= SHOOT ================= */
-
-function shoot(){
-
-    if(playerHP<=0) return;
-
-    lastCombatTime = performance.now();
-
-    const speed=600;
-    const dx=mousePointer.worldX-localPlayer.x;
-    const dy=mousePointer.worldY-localPlayer.y;
-    const len=Math.sqrt(dx*dx+dy*dy);
-
-    const vx=(dx/len)*speed;
-    const vy=(dy/len)*speed;
-
-    const bulletRef=push(ref(database,"bullets"));
-
-    set(bulletRef,{
-        owner:playerId,
-        x:localPlayer.x,
-        y:localPlayer.y,
-        vx,vy
-    });
-
-    setTimeout(()=>remove(bulletRef),2000);
+function createWall(scene, x, y, width, height) {
+    const wall = scene.add.tileSprite(x, y, width, height, 'wallTex');
+    scene.physics.add.existing(wall, true);
+    walls.add(wall);
 }
 
-/* ================= GRENADE ================= */
+/* ================= MECHANIKA OBRAŻEŃ I ŚMIERCI ================= */
+function takeDamage(killerId, hitX, hitY) {
+    if (isDead) return;
 
-function throwGrenade(){
+    playerHP -= 1;
+    lastActionTime = Date.now(); 
+    
+    // Rozgłoszenie efektu trafienia
+    push(ref(database, "hits"), { target: playerId, shooter: killerId, x: hitX, y: hitY, time: Date.now() });
 
-    if(grenadeCooldown || playerHP<=0) return;
-
-    grenadeCooldown=true;
-
-    const grenadeRef=push(ref(database,"grenades"));
-
-    set(grenadeRef,{
-        owner:playerId,
-        x:mousePointer.worldX,
-        y:mousePointer.worldY
-    });
-
-    setTimeout(()=>remove(grenadeRef),1000);
-    setTimeout(()=>grenadeCooldown=false,3000);
+    if (playerHP <= 0) {
+        die(killerId);
+    } else {
+        fbUpdate(ref(database, "players/" + playerId), { hp: playerHP });
+    }
 }
 
-/* ================= DEATH ================= */
-
-function handleDeath(){
-
-    if(isDead) return;
-
-    isDead=true;
-
-    localPlayer.scene.tweens.add({
-        targets: localPlayer,
-        angle:180,
-        scale:0,
-        duration:800
+function playHitEffect(x, y) {
+    const hitCircle = gameScene.add.circle(x, y, 16, 0xff0000);
+    gameScene.tweens.add({
+        targets: hitCircle, scaleX: 2.5, scaleY: 2.5, alpha: 0,
+        duration: 300, onComplete: () => hitCircle.destroy()
     });
+}
 
-    update(ref(database,"players/"+playerId),{ alive:false });
+function die(killerId) {
+    isDead = true;
+    playerHP = 0;
+    localPlayer.body.enable = false;
 
-    setTimeout(()=>{
+    // OFIARA OGŁASZA ŚMIERĆ (wywoła to u zabójcy "onChildAdded" i zabójca doda sobie punkt)
+    push(ref(database, "deaths"), { victim: playerId, killer: killerId, time: Date.now() });
 
-        playerHP=5;
-        isDead=false;
-        localPlayer.setScale(1);
-        localPlayer.setAngle(0);
-        localPlayer.x=400;
-        localPlayer.y=300;
+    fbUpdate(ref(database, "players/" + playerId), { hp: 0, alive: false });
 
-        if(lastHitBy){
-
-            const killerScoreRef = ref(database,"players/"+lastHitBy+"/score");
-
-            runTransaction(killerScoreRef,(current)=>{
-                return (current||0)+1;
-            });
+    // Animacja
+    gameScene.tweens.add({
+        targets: localPlayer, scaleX: 1.5, scaleY: 1.5, alpha: 0,
+        duration: 500,
+        onComplete: () => {
+            setTimeout(() => respawn(), 3000);
         }
-
-        lastHitBy=null;
-
-        update(ref(database,"players/"+playerId),{
-            x:400,
-            y:300,
-            hp:5,
-            alive:true
-        });
-
-    },3000);
+    });
 }
 
-/* ================= UPDATE ================= */
+function respawn() {
+    isDead = false;
+    playerHP = 5;
+    lastActionTime = Date.now(); 
+    
+    localPlayer.x = 400 + Math.random() * 2000; 
+    localPlayer.y = 400 + Math.random() * 2000;
+    
+    localPlayer.scaleX = 1;
+    localPlayer.scaleY = 1;
+    localPlayer.alpha = 1;
+    localPlayer.body.enable = true;
 
-function gameUpdate(time,delta){
+    fbUpdate(ref(database, "players/" + playerId), {
+        hp: playerHP, alive: true, x: localPlayer.x, y: localPlayer.y
+    });
+}
+
+/* ================= STRZELANIE ================= */
+function shoot() {
+    if (isDead || playerHP <= 0 || shootCooldown) return;
+
+    shootCooldown = true;
+    setTimeout(() => shootCooldown = false, 350); 
+    lastActionTime = Date.now(); 
+
+    const speed = 900;
+    const dx = mousePointer.worldX - localPlayer.x;
+    const dy = mousePointer.worldY - localPlayer.y;
+    const len = Math.sqrt(dx*dx + dy*dy);
+    if(len === 0) return;
+
+    const vx = (dx / len) * speed;
+    const vy = (dy / len) * speed;
+
+    const bulletRef = push(ref(database, "bullets"));
+
+    set(bulletRef, {
+        owner: playerId,
+        x: localPlayer.x, y: localPlayer.y,
+        vx, vy
+    });
+
+    setTimeout(() => {
+        remove(bulletRef).catch(()=>{});
+    }, 2000);
+}
+
+/* ================= GŁÓWNA PĘTLA GRY ================= */
+function gameUpdate(time, delta) {
+    if (!localPlayer) return;
 
     localPlayer.body.setVelocity(0);
 
-    if(playerHP>0){
+    if (!isDead) {
         if(cursors.A.isDown) localPlayer.body.setVelocityX(-300);
         if(cursors.D.isDown) localPlayer.body.setVelocityX(300);
         if(cursors.W.isDown) localPlayer.body.setVelocityY(-300);
         if(cursors.S.isDown) localPlayer.body.setVelocityY(300);
-    }
 
-    bulletGroup.getChildren().forEach(bullet=>{
+        // --- MECHANIKA REGENERACJI HP ---
+        const now = Date.now();
+        if (playerHP > 0 && playerHP < 5) {
+            if (now - lastActionTime >= 6000) { 
+                if (!isRegenerating) {
+                    isRegenerating = true;
+                    nextRegenTime = now; 
+                }
 
-        if(bullet.owner===playerId) return;
-        if(playerHP<=0) return;
-
-        const dist=Phaser.Math.Distance.Between(
-            bullet.x,bullet.y,
-            localPlayer.x,localPlayer.y
-        );
-
-        if(dist<20){
-
-            lastHitBy=bullet.owner;
-            playerHP--;
-            lastCombatTime=time;
-
-            remove(ref(database,"bullets/"+bullet.firebaseId));
-
-            if(playerHP<=0){
-                handleDeath();
+                if (now >= nextRegenTime) {
+                    playerHP = Math.min(5, playerHP + 1);
+                    nextRegenTime = now + 3000; 
+                    fbUpdate(ref(database, "players/" + playerId), { hp: playerHP });
+                }
             }
-        }
-    });
-
-    /* HP REGEN */
-
-    if(playerHP>0 && playerHP<5){
-
-        if(time-lastCombatTime>7000){
-
-            regenTimer+=delta;
-
-            if(regenTimer>=3000){
-                playerHP++;
-                regenTimer=0;
-            }
+        } else {
+            isRegenerating = false;
         }
     }
 
-    hpText.setText("HP:"+playerHP);
-    scoreText.setText("Score:"+score);
+    hpText.setText("HP: " + playerHP);
 
-    networkTimer+=delta;
-
-    if(networkTimer>=NETWORK_RATE){
-        networkTimer=0;
-        update(ref(database,"players/"+playerId),{
-            x:localPlayer.x,
-            y:localPlayer.y,
-            hp:playerHP,
-            score:score
+    networkTimer += delta;
+    if (networkTimer >= NETWORK_RATE && !isDead) {
+        networkTimer = 0;
+        fbUpdate(ref(database, "players/" + playerId), {
+            x: Math.round(localPlayer.x),
+            y: Math.round(localPlayer.y)
         });
     }
 }
 
-/* INIT */
-
-await login();
-createMenu();
+/* ROZPOCZĘCIE */
+login();
 
 </script>
 </head>
-<body style="margin:0; overflow:hidden;"></body>
+<body></body>
 </html>
